@@ -196,12 +196,33 @@ int LJ_FASTCALL lj_prng_seed_secure(PRNGState *rs)
   /* Keep the library loaded in case multiple VMs are started. */
   if (!libfunc_rgr) {
     HMODULE lib = LJ_WIN_LOADLIBA("advapi32.dll");
-    if (!lib) return 0;
-    libfunc_rgr = (PRGR)GetProcAddress(lib, "SystemFunction036");
-    if (!libfunc_rgr) return 0;
+    if (lib)
+      libfunc_rgr = (PRGR)GetProcAddress(lib, "SystemFunction036");
   }
-  if (libfunc_rgr(rs->u, (ULONG)sizeof(rs->u)))
+  if (libfunc_rgr && libfunc_rgr(rs->u, (ULONG)sizeof(rs->u)))
     goto ok;
+
+  /* Fallback for native-NT environments without advapi32 (e.g. the
+  ** MicroNT / cr testbed): mix high-res system time, perf counter, and
+  ** a stack-frame address. Not crypto-grade, but unpredictable enough
+  ** for LuaJIT's hash-key randomization — the only thing this seed
+  ** feeds. */
+  {
+    LARGE_INTEGER t;
+    uint64_t st, pc;
+    uintptr_t sp = (uintptr_t)&t;
+    GetSystemTimeAsFileTime((FILETIME *)&t);
+    st = ((uint64_t)t.HighPart << 32) | t.LowPart;
+    if (QueryPerformanceCounter((LARGE_INTEGER *)&t))
+      pc = ((uint64_t)t.HighPart << 32) | t.LowPart;
+    else
+      pc = st * 2862933555777941757ull + 3037000493ull;
+    rs->u[0] = st ^ (pc << 13);
+    rs->u[1] = pc ^ (st >> 7) ^ (uint64_t)sp;
+    rs->u[2] = (st + pc) * 6364136223846793005ull;
+    rs->u[3] = (pc ^ (uint64_t)sp) * 1442695040888963407ull;
+    goto ok;
+  }
 
 #elif LJ_TARGET_POSIX
 
