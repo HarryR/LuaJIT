@@ -162,9 +162,6 @@ enum {
 #if !LJ_TARGET_UWP
   CLIB_HANDLE_DLL,
   CLIB_HANDLE_CRT,
-  CLIB_HANDLE_KERNEL32,
-  CLIB_HANDLE_USER32,
-  CLIB_HANDLE_GDI32,
 #endif
   CLIB_HANDLE_MAX
 };
@@ -221,16 +218,11 @@ static void *clib_loadlib(lua_State *L, const char *name, int global)
 static void clib_unloadlib(CLibrary *cl)
 {
   if (cl->handle == CLIB_DEFHANDLE) {
-#if !LJ_TARGET_UWP
-    MSize i;
-    for (i = CLIB_HANDLE_KERNEL32; i < CLIB_HANDLE_MAX; i++) {
-      void *h = clib_def_handle[i];
-      if (h) {
-	clib_def_handle[i] = NULL;
-	FreeLibrary((HINSTANCE)h);
-      }
-    }
-#endif
+    /* The kernel32/user32/gdi32 LoadLibrary path has been removed, and
+     * those were the only default handles ffi.C ever owned a reference
+     * to.  The remaining EXE/DLL/CRT entries are GetModuleHandleEx
+     * borrows taken with GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT —
+     * we hold no refcount, so there's nothing for FreeLibrary to do. */
   } else if (cl->handle) {
     FreeLibrary((HINSTANCE)cl->handle);
   }
@@ -261,9 +253,6 @@ static void *clib_getsym(CLibrary *cl, const char *name)
 	  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 			     (const char *)&_fmode, &h);
 	  break;
-	case CLIB_HANDLE_KERNEL32: h = LJ_WIN_LOADLIBA("kernel32.dll"); break;
-	case CLIB_HANDLE_USER32: h = LJ_WIN_LOADLIBA("user32.dll"); break;
-	case CLIB_HANDLE_GDI32: h = LJ_WIN_LOADLIBA("gdi32.dll"); break;
 	}
 	if (!h) continue;
 #endif
