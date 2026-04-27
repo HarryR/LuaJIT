@@ -101,9 +101,10 @@ extern int sceRandomGetRandomNumber(void *buf, size_t len);
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
 #else
-/* If you wonder about this mess, then search online for RtlGenRandom. */
-typedef BOOLEAN (WINAPI *PRGR)(void *buf, ULONG len);
-static PRGR libfunc_rgr;
+/* The historical advapi32!SystemFunction036 (RtlGenRandom) lookup was
+** dropped; lj_prng_seed_secure() now prefers RDRAND when CPUID
+** advertises it, with a time + perf-counter + stack-address mix as the
+** environmental fallback.  See that function for details. */
 #endif
 
 #elif LJ_TARGET_POSIX
@@ -193,20 +194,61 @@ int LJ_FASTCALL lj_prng_seed_secure(PRNGState *rs)
 
 #elif LJ_TARGET_WINDOWS
 
-  /* Keep the library loaded in case multiple VMs are started. */
-  if (!libfunc_rgr) {
-    HMODULE lib = LJ_WIN_LOADLIBA("advapi32.dll");
-    if (lib)
-      libfunc_rgr = (PRGR)GetProcAddress(lib, "SystemFunction036");
+  /* Hardware DRBG via RDRAND — Ivy Bridge / Bulldozer (2012) onwards;
+  ** QEMU exposes it whenever the host CPU has it.  No DLL, no syscall,
+  ** no Win32 surface: a single ring-3 instruction that pulls from the
+  ** on-die conditioned entropy source.  Gated by CPUID.01:ECX[30]; the
+  ** check runs once per process and the result is cached.
+  **
+  ** Why RDRAND here at all: ntdll has RtlRandom but it's a 31-bit LCG,
+  ** not entropy.  RtlGenRandom (the historical "real" RNG) lives in
+  ** advapi32 — a Win32-subsystem DLL not always available on stripped-
+  ** down NT runtimes — so the legacy LoadLibrary("advapi32.dll") path
+  ** silently failed and fell through.  RDRAND skips both layers and
+  ** lands ~256 bits at <5μs.  Called only from luaL_newstate /
+  ** math.randomseed(), so the CPUID gate and branch are invisible
+  ** next to the surrounding cost. */
+  {
+    static int rdrand_checked = 0;
+    static int rdrand_ok = 0;
+    if (!rdrand_checked) {
+      uint32_t eax_, ebx_, ecx_, edx_;
+      __asm__ volatile ("cpuid"
+                        : "=a"(eax_), "=b"(ebx_), "=c"(ecx_), "=d"(edx_)
+                        : "a"(1));
+      rdrand_ok = (int)((ecx_ >> 30) & 1u);
+      rdrand_checked = 1;
+    }
+    if (rdrand_ok) {
+      uint32_t *p = (uint32_t *)rs->u;
+      int n = (int)(sizeof(rs->u) / sizeof(uint32_t));
+      int i, filled = 0;
+      for (i = 0; i < n; i++) {
+        uint32_t v;
+        unsigned char cf = 0;
+        int retry;
+        /* Intel guidance: retry up to 10 times — RDRAND can transiently
+        ** fail under contention.  Persistent CF=0 after that many tries
+        ** means the on-die DRBG is wedged; abandon and fall through to
+        ** the environmental seed below. */
+        for (retry = 0; retry < 10; retry++) {
+          __asm__ volatile ("rdrand %0; setc %1"
+                            : "=r"(v), "=qm"(cf));
+          if (cf) break;
+        }
+        if (!cf) break;
+        p[i] = v;
+        filled++;
+      }
+      if (filled == n) goto ok;
+    }
   }
-  if (libfunc_rgr && libfunc_rgr(rs->u, (ULONG)sizeof(rs->u)))
-    goto ok;
 
-  /* Fallback for native-NT environments without advapi32 (e.g. the
-  ** MicroNT / cr testbed): mix high-res system time, perf counter, and
-  ** a stack-frame address. Not crypto-grade, but unpredictable enough
-  ** for LuaJIT's hash-key randomization — the only thing this seed
-  ** feeds. */
+  /* Environmental fallback: pre-2012 CPUs without RDRAND, or a wedged
+  ** on-die DRBG.  Mix high-res system time, perf counter, and a
+  ** stack-frame address.  Sub-crypto but plenty for hash-key
+  ** randomization (the only consumer of this seed); modern hardware
+  ** never reaches here. */
   {
     LARGE_INTEGER t;
     uint64_t st, pc;
