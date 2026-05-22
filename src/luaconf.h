@@ -19,8 +19,8 @@
 ** substitution (GetModuleFileName) and `.\` CWD entries don't apply when
 ** running as a native-subsystem process with no Win32 directory semantics.
 */
-#define LUA_LDIR	"\\SystemRoot\\lua\\"
-#define LUA_CDIR	"\\SystemRoot\\lua\\"
+#define LUA_LDIR	"\\SystemRoot\\pkg\\"
+#define LUA_CDIR	"\\SystemRoot\\pkg\\"
 #define LUA_PATH_DEFAULT \
   LUA_LDIR"?.lua;" LUA_LDIR"?\\init.lua"
 #define LUA_CPATH_DEFAULT \
